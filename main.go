@@ -37,7 +37,7 @@ type sparseBundleHeader struct {
 type band struct {
 	path     string
 	id       uint64
-	sector   uint64
+	offset   uint64
 	size     uint64
 	attached bool
 	dev      losetup.Device
@@ -48,8 +48,6 @@ var opts struct {
 	DeviceName string `short:"d" long:"name" default:"sparse"`
 	NoOp       bool   `short:"N"`
 }
-
-const DM_SECTOR_SIZE int = 512
 
 func main() {
 	args, err := flags.ParseArgs(&opts, os.Args)
@@ -79,7 +77,7 @@ func main() {
 
 	bandDir := filepath.Join(bundle, "bands")
 	bands := make([]band, 0, 32768)
-	secPerBand := header.BandSize / uint64(DM_SECTOR_SIZE)
+	bandSizeInBytes := header.BandSize
 	err = filepath.WalkDir(bandDir, func(path string, d fs.DirEntry, err error) error {
 		if d.IsDir() {
 			return nil
@@ -96,8 +94,8 @@ func main() {
 		bands = append(bands, band{
 			path:   path,
 			id:     uint64(id),
-			sector: id * secPerBand,
-			size:   uint64(info.Size()) / uint64(DM_SECTOR_SIZE),
+			offset: id * bandSizeInBytes,
+			size:   uint64(info.Size()),
 		})
 		return nil
 	})
@@ -107,7 +105,7 @@ func main() {
 	}
 
 	slices.SortFunc(bands, func(a, b band) int {
-		return int(int64(a.sector) - int64(b.sector))
+		return int(int64(a.offset) - int64(b.offset))
 	})
 
 	prog := progressbar.NewOptions(len(bands)+1,
@@ -117,7 +115,7 @@ func main() {
 
 	table := make([]devmapper.Table, 0, len(bands))
 
-	lastSec := uint64(0)
+	lastByte := uint64(0)
 	for i, _ := range bands {
 		prog.Add(1)
 		devPath := "dummy"
@@ -134,20 +132,20 @@ func main() {
 			bands[i].attached = true
 		}
 
-		if lastSec != bands[i].sector {
+		if lastByte != bands[i].offset {
 			table = append(table, devmapper.ZeroTable{
-				Start:  lastSec,
-				Length: bands[i].sector - lastSec,
+				Start:  lastByte,
+				Length: bands[i].offset - lastByte,
 			})
 		}
 
 		table = append(table, devmapper.LinearTable{
-			Start:         bands[i].sector,
+			Start:         bands[i].offset,
 			Length:        bands[i].size,
 			BackendDevice: devPath,
 		})
 
-		lastSec = bands[i].sector + bands[i].size
+		lastByte = bands[i].offset + bands[i].size
 	}
 
 	prog.Exit()
