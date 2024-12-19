@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jessevdk/go-flags"
@@ -45,7 +47,7 @@ type band struct {
 
 var opts struct {
 	Verbose    bool   `short:"v"`
-	DeviceName string `short:"d" long:"name" default:"sparse"`
+	DeviceName string `short:"d" long:"name"`
 	NoOp       bool   `short:"N"`
 }
 
@@ -157,8 +159,20 @@ func main() {
 		})
 	}
 
-
 	mapperActive := false
+
+	if opts.DeviceName == "" {
+		n := ""
+		base := strings.TrimSuffix(filepath.Base(bundle), filepath.Ext(bundle))
+		for _, r := range base {
+			if unicode.IsLetter(r) {
+				n += string(unicode.ToLower(r))
+			} else {
+				n += "_"
+			}
+		}
+		opts.DeviceName = n
+	}
 
 	if !opts.NoOp {
 		err = devmapper.CreateAndLoad(opts.DeviceName, uuid.New().String(), devmapper.ReadOnlyFlag, table...)
