@@ -5,11 +5,13 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jessevdk/go-flags"
 	"howett.net/plist"
 
@@ -43,7 +45,7 @@ type band struct {
 
 var opts struct {
 	Verbose    bool   `short:"v"`
-	DeviceName string `short:"d" long:"name"`
+	DeviceName string `short:"d" long:"name" default:"sparse"`
 	NoOp       bool   `short:"N"`
 }
 
@@ -120,17 +122,17 @@ func main() {
 		prog.Add(1)
 		devPath := "dummy"
 		if opts.NoOp {
-			time.Sleep(time.Millisecond * 5)
+			time.Sleep(time.Millisecond * 1)
 		} else {
 			ldev, err := losetup.Attach(bands[i].path, 0, true)
 			if err != nil {
-				prog.AddDetail(fmt.Sprintf("failed to attach %x: %v\n", bands[i].id, err))
+				prog.AddDetail(fmt.Sprintf("failed to attach %x: %v", bands[i].id, err))
 				continue
 			}
 			bands[i].dev = ldev
 			devPath = ldev.Path()
+			bands[i].attached = true
 		}
-		bands[i].attached = true
 
 		if lastSec != bands[i].sector {
 			table = append(table, devmapper.ZeroTable{
@@ -148,5 +150,60 @@ func main() {
 		lastSec = bands[i].sector + bands[i].size
 	}
 
-	prog.Finish()
+	prog.Exit()
+
+	mapperActive := false
+
+	if !opts.NoOp {
+		err = devmapper.CreateAndLoad(opts.DeviceName, uuid.New().String(), devmapper.ReadOnlyFlag, table...)
+		if err != nil {
+			log.Println(err)
+		} else {
+			mapperActive = true
+			log.Printf("Mapper device %s up and running. Press ^C to tear down.")
+		}
+	}
+
+	waitCh := make(chan os.Signal)
+	signal.Notify(waitCh, os.Interrupt)
+	for {
+		<-waitCh
+		if mapperActive {
+			err = devmapper.Remove(opts.DeviceName)
+			if err != nil {
+				log.Println(err)
+				log.Printf("Device could not be removed. Press ^C to try again")
+				continue
+			}
+			mapperActive = false
+		}
+
+		prog := progressbar.NewOptions(len(bands)+1,
+			progressbar.OptionSetDescription("detaching"),
+			progressbar.OptionSetMaxDetailRow(4),
+		)
+
+		anyFailures := false
+		for i, _ := range bands {
+			prog.Add(1)
+			if bands[i].attached {
+				err := bands[i].dev.Detach()
+				if err != nil {
+					anyFailures = true
+					prog.AddDetail(fmt.Sprintf("failed to detach %x: %v", bands[i].id, err))
+					continue
+				}
+				bands[i].dev.Remove()
+				bands[i].attached = false
+			}
+		}
+
+		prog.Exit()
+		if anyFailures {
+			log.Printf("failed to detach all loop devices")
+			continue
+		}
+
+		os.Exit(0)
+	}
 }
