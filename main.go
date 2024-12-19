@@ -148,7 +148,7 @@ func main() {
 		} else {
 			ldev, err := losetup.Attach(bundle.bands[i].path, 0, true)
 			if err != nil {
-				log.Println("failed to attach %x: %v", bundle.bands[i].id, err)
+				log.Printf("failed to attach %x: %v", bundle.bands[i].id, err)
 				continue
 			}
 			bundle.bands[i].dev = ldev
