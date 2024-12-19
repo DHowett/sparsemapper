@@ -225,12 +225,8 @@ func main() {
 			mapperActive = false
 		}
 
-		prog := progressbar.NewOptions(len(bundle.bands),
-			progressbar.OptionSetDescription("detaching"),
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionShowCount(),
-			progressbar.OptionShowIts(),
-		)
+		prog.Describe("detaching")
+		prog.Reset()
 
 		anyDetachFail := false
 		for i, _ := range bundle.bands {
