@@ -166,7 +166,7 @@ func main() {
 			log.Println(err)
 		} else {
 			mapperActive = true
-			log.Printf("Mapper device %s up and running. Press ^C to tear down.")
+			log.Printf("Mapper device %s up and running. ^C to shut down.", opts.DeviceName)
 		}
 	}
 
