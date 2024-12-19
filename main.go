@@ -148,6 +148,13 @@ func main() {
 		lastByte = bands[i].offset + bands[i].size
 	}
 
+	if lastByte != header.Size {
+		table = append(table, devmapper.ZeroTable{
+			Start:  lastByte,
+			Length: header.Size - lastByte,
+		})
+	}
+
 	prog.Exit()
 
 	mapperActive := false
