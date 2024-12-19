@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -137,14 +138,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	verb := len(opts.Verbose)
+
 	path := args[1]
 	bundle, err := readBundle(path)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	var progressOutput io.Writer = os.Stderr
+	if verb >= 2 {
+		progressOutput = io.Discard
+	}
 
 	prog := progressbar.NewOptions(len(bundle.bands),
 		progressbar.OptionSetDescription("attaching"),
 		progressbar.OptionClearOnFinish(),
 		progressbar.OptionShowCount(),
 		progressbar.OptionShowIts(),
+		progressbar.OptionSetWriter(progressOutput),
 	)
 
 	table := make([]devmapper.Table, 0, len(bundle.bands))
@@ -155,11 +167,17 @@ func main() {
 		devPath := "dummy"
 		if opts.NoOp {
 			time.Sleep(time.Millisecond * 1)
+			if verb >= 2 {
+				log.Printf("[no-op] attached %s", bundle.bands[i].path)
+			}
 		} else {
 			ldev, err := losetup.Attach(bundle.bands[i].path, 0, true)
 			if err != nil {
 				log.Printf("failed to attach %x: %v", bundle.bands[i].id, err)
 				continue
+			}
+			if verb >= 2 {
+				log.Printf("attached %s as %s", bundle.bands[i].path, ldev.Path())
 			}
 			bundle.bands[i].dev = ldev
 			devPath = ldev.Path()
@@ -204,14 +222,21 @@ func main() {
 		opts.DeviceName = n
 	}
 
+	if verb >= 1 {
+		log.Printf("creating device mapper node `%s' with a %d-entry table", opts.DeviceName, len(table))
+	}
+
 	if !opts.NoOp {
 		err = devmapper.CreateAndLoad(opts.DeviceName, uuid.New().String(), devmapper.ReadOnlyFlag, table...)
 		if err != nil {
 			log.Println(err)
 		} else {
 			mapperActive = true
-			log.Printf("Mapper device %s up and running. ^C to shut down.", opts.DeviceName)
 		}
+	}
+
+	if mapperActive || opts.NoOp {
+		log.Printf("`%s' ready (%d entries). ^C to shut down.", opts.DeviceName, len(table))
 	}
 
 	waitCh := make(chan os.Signal)
@@ -226,6 +251,9 @@ func main() {
 		}
 
 		if mapperActive {
+			if verb >= 1 {
+				log.Printf("unmapping `%s'", opts.DeviceName)
+			}
 			err = devmapper.Remove(opts.DeviceName)
 			if err != nil {
 				log.Println(err)
@@ -248,8 +276,14 @@ func main() {
 					log.Printf("failed to detach %s: %v", bundle.bands[i].dev.Path(), err)
 					continue
 				}
+				if verb >= 2 {
+					log.Printf("detached %s from %s", bundle.bands[i].path, bundle.bands[i].dev.Path())
+				}
 				bundle.bands[i].attached = false
 			} else if opts.NoOp {
+				if verb >= 2 {
+					log.Printf("[no-op] detached %s", bundle.bands[i].path)
+				}
 				time.Sleep(time.Millisecond * 1)
 			}
 		}
