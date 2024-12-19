@@ -108,9 +108,11 @@ func main() {
 		return int(int64(a.offset) - int64(b.offset))
 	})
 
-	prog := progressbar.NewOptions(len(bands)+1,
+	prog := progressbar.NewOptions(len(bands),
 		progressbar.OptionSetDescription("attaching"),
-		progressbar.OptionSetMaxDetailRow(4),
+		progressbar.OptionClearOnFinish(),
+		progressbar.OptionShowCount(),
+		progressbar.OptionShowIts(),
 	)
 
 	table := make([]devmapper.Table, 0, len(bands))
@@ -124,7 +126,7 @@ func main() {
 		} else {
 			ldev, err := losetup.Attach(bands[i].path, 0, true)
 			if err != nil {
-				prog.AddDetail(fmt.Sprintf("failed to attach %x: %v", bands[i].id, err))
+				log.Println("failed to attach %x: %v", bands[i].id, err)
 				continue
 			}
 			bands[i].dev = ldev
@@ -155,7 +157,6 @@ func main() {
 		})
 	}
 
-	prog.Exit()
 
 	mapperActive := false
 
@@ -183,9 +184,11 @@ func main() {
 			mapperActive = false
 		}
 
-		prog := progressbar.NewOptions(len(bands)+1,
+		prog := progressbar.NewOptions(len(bands),
 			progressbar.OptionSetDescription("detaching"),
-			progressbar.OptionSetMaxDetailRow(4),
+			progressbar.OptionClearOnFinish(),
+			progressbar.OptionShowCount(),
+			progressbar.OptionShowIts(),
 		)
 
 		anyFailures := false
@@ -195,7 +198,7 @@ func main() {
 				err := bands[i].dev.Detach()
 				if err != nil {
 					anyFailures = true
-					prog.AddDetail(fmt.Sprintf("failed to detach %x: %v", bands[i].id, err))
+					log.Println("failed to detach %x: %v", bands[i].id, err)
 					continue
 				}
 				bands[i].dev.Remove()
@@ -203,7 +206,6 @@ func main() {
 			}
 		}
 
-		prog.Exit()
 		if anyFailures {
 			log.Printf("failed to detach all loop devices")
 			continue
