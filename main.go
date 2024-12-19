@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -45,42 +44,41 @@ type band struct {
 	dev      losetup.Device
 }
 
-var opts struct {
-	Verbose    bool   `short:"v"`
-	DeviceName string `short:"d" long:"name"`
-	NoOp       bool   `short:"N"`
+type sparseBundle struct {
+	h     sparseBundleHeader
+	path  string
+	bands []band
 }
 
-func main() {
-	args, err := flags.ParseArgs(&opts, os.Args)
-	if len(args) < 2 {
-		log.Fatalln("insufficient args; pass path to bundle")
-	}
+func readBundle(path string) (*sparseBundle, error) {
+	info := filepath.Join(path, "Info.plist")
+	b := &sparseBundle{path: path}
+
+	f, err := os.Open(info)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
+	}
+	defer f.Close()
+
+	dec := plist.NewDecoder(f)
+
+	err = dec.Decode(&b.h)
+	if err != nil {
+		return nil, err
 	}
 
-	bundle := args[1]
-	info := filepath.Join(bundle, "Info.plist")
-	var header sparseBundleHeader
-
-	{
-		f, err := os.Open(info)
-		if err != nil {
-			log.Fatalln(err)
-		}
-		defer f.Close()
-		dec := plist.NewDecoder(f)
-		err = dec.Decode(&header)
-		if err != nil {
-			log.Fatalln(err)
-		}
+	b.bands, err = enumBands(path, b.h.BandSize)
+	if err != nil {
+		return nil, err
 	}
 
-	bandDir := filepath.Join(bundle, "bands")
+	return b, nil
+}
+
+func enumBands(bundlePath string, bandSizeInBytes uint64) ([]band, error) {
 	bands := make([]band, 0, 32768)
-	bandSizeInBytes := header.BandSize
-	err = filepath.WalkDir(bandDir, func(path string, d fs.DirEntry, err error) error {
+	bandDir := filepath.Join(bundlePath, "bands")
+	err := filepath.WalkDir(bandDir, func(path string, d fs.DirEntry, err error) error {
 		if d.IsDir() {
 			return nil
 		}
@@ -103,59 +101,81 @@ func main() {
 	})
 
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
 	slices.SortFunc(bands, func(a, b band) int {
 		return int(int64(a.offset) - int64(b.offset))
 	})
 
-	prog := progressbar.NewOptions(len(bands),
+	return bands, nil
+
+}
+
+var opts struct {
+	Verbose    bool   `short:"v"`
+	DeviceName string `short:"d" long:"name"`
+	NoOp       bool   `short:"N"`
+}
+
+func main() {
+	args, err := flags.ParseArgs(&opts, os.Args)
+	if len(args) < 2 {
+		log.Fatalln("insufficient args; pass path to bundle")
+	}
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	path := args[1]
+	bundle, err := readBundle(path)
+
+	prog := progressbar.NewOptions(len(bundle.bands),
 		progressbar.OptionSetDescription("attaching"),
 		progressbar.OptionClearOnFinish(),
 		progressbar.OptionShowCount(),
 		progressbar.OptionShowIts(),
 	)
 
-	table := make([]devmapper.Table, 0, len(bands))
+	table := make([]devmapper.Table, 0, len(bundle.bands))
 
 	lastByte := uint64(0)
-	for i, _ := range bands {
+	for i, _ := range bundle.bands {
 		prog.Add(1)
 		devPath := "dummy"
 		if opts.NoOp {
 			time.Sleep(time.Millisecond * 1)
 		} else {
-			ldev, err := losetup.Attach(bands[i].path, 0, true)
+			ldev, err := losetup.Attach(bundle.bands[i].path, 0, true)
 			if err != nil {
-				log.Println("failed to attach %x: %v", bands[i].id, err)
+				log.Println("failed to attach %x: %v", bundle.bands[i].id, err)
 				continue
 			}
-			bands[i].dev = ldev
+			bundle.bands[i].dev = ldev
 			devPath = ldev.Path()
-			bands[i].attached = true
+			bundle.bands[i].attached = true
 		}
 
-		if lastByte != bands[i].offset {
+		if lastByte != bundle.bands[i].offset {
 			table = append(table, devmapper.ZeroTable{
 				Start:  lastByte,
-				Length: bands[i].offset - lastByte,
+				Length: bundle.bands[i].offset - lastByte,
 			})
 		}
 
 		table = append(table, devmapper.LinearTable{
-			Start:         bands[i].offset,
-			Length:        bands[i].size,
+			Start:         bundle.bands[i].offset,
+			Length:        bundle.bands[i].size,
 			BackendDevice: devPath,
 		})
 
-		lastByte = bands[i].offset + bands[i].size
+		lastByte = bundle.bands[i].offset + bundle.bands[i].size
 	}
 
-	if lastByte != header.Size {
+	if lastByte != bundle.h.Size {
 		table = append(table, devmapper.ZeroTable{
 			Start:  lastByte,
-			Length: header.Size - lastByte,
+			Length: bundle.h.Size - lastByte,
 		})
 	}
 
@@ -163,7 +183,7 @@ func main() {
 
 	if opts.DeviceName == "" {
 		n := ""
-		base := strings.TrimSuffix(filepath.Base(bundle), filepath.Ext(bundle))
+		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		for _, r := range base {
 			if unicode.IsLetter(r) {
 				n += string(unicode.ToLower(r))
@@ -205,7 +225,7 @@ func main() {
 			mapperActive = false
 		}
 
-		prog := progressbar.NewOptions(len(bands),
+		prog := progressbar.NewOptions(len(bundle.bands),
 			progressbar.OptionSetDescription("detaching"),
 			progressbar.OptionClearOnFinish(),
 			progressbar.OptionShowCount(),
@@ -213,16 +233,18 @@ func main() {
 		)
 
 		anyDetachFail := false
-		for i, _ := range bands {
+		for i, _ := range bundle.bands {
 			prog.Add(1)
-			if bands[i].attached {
-				err := bands[i].dev.Detach()
+			if bundle.bands[i].attached {
+				err := bundle.bands[i].dev.Detach()
 				if err != nil {
 					anyDetachFail = true
-					log.Printf("failed to detach %s: %v", bands[i].dev.Path(), err)
+					log.Printf("failed to detach %s: %v", bundle.bands[i].dev.Path(), err)
 					continue
 				}
-				bands[i].attached = false
+				bundle.bands[i].attached = false
+			} else if opts.NoOp {
+				time.Sleep(time.Millisecond * 1)
 			}
 		}
 
