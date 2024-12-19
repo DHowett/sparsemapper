@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -113,18 +114,27 @@ func enumBands(bundlePath string, bandSizeInBytes uint64) ([]band, error) {
 }
 
 var opts struct {
-	Verbose    bool   `short:"v"`
-	DeviceName string `short:"d" long:"name"`
-	NoOp       bool   `short:"N"`
+	Verbose    []bool `short:"v" description:"verbose (more is more)"`
+	DeviceName string `short:"d" long:"name" description:"name of device-mapper device to create; if not specified, one will be generated"`
+	NoOp       bool   `short:"N" description:"pretend"`
 }
 
 func main() {
-	args, err := flags.ParseArgs(&opts, os.Args)
-	if len(args) < 2 {
-		log.Fatalln("insufficient args; pass path to bundle")
-	}
+	p := flags.NewParser(&opts, flags.HelpFlag|flags.PrintErrors)
+	p.Usage = "[options] sparsebundle"
+	args, err := p.ParseArgs(os.Args)
 	if err != nil {
-		log.Fatalln(err)
+		if !flags.WroteHelp(err) {
+			log.Fatalln(err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "missing bundle path\n")
+		p.WriteHelp(os.Stderr)
+		os.Exit(1)
 	}
 
 	path := args[1]
