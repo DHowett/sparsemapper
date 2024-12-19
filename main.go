@@ -186,13 +186,20 @@ func main() {
 
 	waitCh := make(chan os.Signal)
 	signal.Notify(waitCh, os.Interrupt)
+	failures := 0
 	for {
 		<-waitCh
+
+		if failures >= 2 {
+			log.Println("giving up despite earlier failures")
+			break
+		}
+
 		if mapperActive {
 			err = devmapper.Remove(opts.DeviceName)
 			if err != nil {
 				log.Println(err)
-				log.Printf("Device could not be removed. Press ^C to try again")
+				log.Printf("failed to unmap dm")
 				continue
 			}
 			mapperActive = false
@@ -205,26 +212,39 @@ func main() {
 			progressbar.OptionShowIts(),
 		)
 
-		anyFailures := false
+		anyDetachFail := false
 		for i, _ := range bands {
 			prog.Add(1)
 			if bands[i].attached {
 				err := bands[i].dev.Detach()
 				if err != nil {
-					anyFailures = true
-					log.Println("failed to detach %x: %v", bands[i].id, err)
+					anyDetachFail = true
+					log.Printf("failed to detach %s: %v", bands[i].dev.Path(), err)
 					continue
 				}
-				bands[i].dev.Remove()
 				bands[i].attached = false
 			}
 		}
 
-		if anyFailures {
-			log.Printf("failed to detach all loop devices")
+		if anyDetachFail {
+			switch failures {
+			case 0:
+				log.Printf("failed to detach all loop devices; ^C to try again")
+			case 1:
+				log.Printf("failed (again) to detach all loop devices; ^C to give up")
+			}
+			failures++
 			continue
+		} else {
+			// reset counter for clean exit
+			failures = 0
 		}
 
-		os.Exit(0)
+		break
 	}
+	e := 0
+	if failures > 0 {
+		e = 1
+	}
+	os.Exit(e)
 }
