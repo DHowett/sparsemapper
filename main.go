@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -111,7 +113,98 @@ func enumBands(bundlePath string, bandSizeInBytes uint64) ([]band, error) {
 	})
 
 	return bands, nil
+}
 
+var errCancelled = errors.New("cancelled")
+
+func attachBandsAndPrepareTable(bands []band, bundleSize uint64, prog *progressbar.ProgressBar, ctx context.Context) ([]devmapper.Table, error) {
+	table := make([]devmapper.Table, 0, len(bands))
+
+	lastByte := uint64(0)
+	for i, _ := range bands {
+		select {
+		case <-ctx.Done():
+			log.Println("bailing out")
+			return nil, errCancelled
+		default:
+		}
+
+		prog.Add(1)
+		devPath := "dummy"
+		if opts.NoOp {
+			time.Sleep(time.Millisecond * 1)
+			if verbosity >= 2 {
+				log.Printf("[no-op] attached %s", bands[i].path)
+			}
+		} else {
+			ldev, err := losetup.Attach(bands[i].path, 0, true)
+			if err != nil {
+				log.Printf("failed to attach %x: %v", bands[i].id, err)
+				continue
+			}
+			if verbosity >= 2 {
+				log.Printf("attached %s as %s", bands[i].path, ldev.Path())
+			}
+			bands[i].dev = ldev
+			devPath = ldev.Path()
+			bands[i].attached = true
+		}
+
+		if lastByte != bands[i].offset {
+			table = append(table, devmapper.ZeroTable{
+				Start:  lastByte,
+				Length: bands[i].offset - lastByte,
+			})
+		}
+
+		table = append(table, devmapper.LinearTable{
+			Start:         bands[i].offset,
+			Length:        bands[i].size,
+			BackendDevice: devPath,
+		})
+
+		lastByte = bands[i].offset + bands[i].size
+	}
+
+	if lastByte != bundleSize {
+		table = append(table, devmapper.ZeroTable{
+			Start:  lastByte,
+			Length: bundleSize - lastByte,
+		})
+	}
+
+	return table, nil
+}
+
+func detachBands(bands []band, prog *progressbar.ProgressBar) error {
+	prog.Describe("detaching")
+	prog.Reset()
+
+	anyDetachFail := false
+	for i, _ := range bands {
+		prog.Add(1)
+		if bands[i].attached {
+			err := bands[i].dev.Detach()
+			if err != nil {
+				anyDetachFail = true
+				log.Printf("failed to detach %s: %v", bands[i].dev.Path(), err)
+				continue
+			}
+			if verbosity >= 2 {
+				log.Printf("detached %s from %s", bands[i].path, bands[i].dev.Path())
+			}
+			bands[i].attached = false
+		} else if opts.NoOp {
+			if verbosity >= 2 {
+				log.Printf("[no-op] detached %s", bands[i].path)
+			}
+			time.Sleep(time.Millisecond * 1)
+		}
+	}
+	if anyDetachFail {
+		return errors.New("failed to detach all bands")
+	}
+	return nil
 }
 
 var opts struct {
@@ -119,6 +212,8 @@ var opts struct {
 	DeviceName string `short:"d" long:"name" description:"name of device-mapper device to create; if not specified, one will be generated"`
 	NoOp       bool   `short:"N" description:"pretend"`
 }
+
+var verbosity int
 
 func main() {
 	p := flags.NewParser(&opts, flags.HelpFlag|flags.PrintErrors)
@@ -138,7 +233,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	verb := len(opts.Verbose)
+	verbosity = len(opts.Verbose)
 
 	path := args[1]
 	bundle, err := readBundle(path)
@@ -147,7 +242,7 @@ func main() {
 	}
 
 	var progressOutput io.Writer = os.Stderr
-	if verb >= 2 {
+	if verbosity >= 2 {
 		progressOutput = io.Discard
 	}
 
@@ -172,61 +267,25 @@ func main() {
 		opts.DeviceName = n
 	}
 
-	if verb >= 1 {
+	if verbosity >= 1 {
 		log.Printf("preparing loopback devices for dm node `%s'", opts.DeviceName)
 	}
 
-	table := make([]devmapper.Table, 0, len(bundle.bands))
-
-	lastByte := uint64(0)
-	for i, _ := range bundle.bands {
-		prog.Add(1)
-		devPath := "dummy"
-		if opts.NoOp {
-			time.Sleep(time.Millisecond * 1)
-			if verb >= 2 {
-				log.Printf("[no-op] attached %s", bundle.bands[i].path)
-			}
-		} else {
-			ldev, err := losetup.Attach(bundle.bands[i].path, 0, true)
-			if err != nil {
-				log.Printf("failed to attach %x: %v", bundle.bands[i].id, err)
-				continue
-			}
-			if verb >= 2 {
-				log.Printf("attached %s as %s", bundle.bands[i].path, ldev.Path())
-			}
-			bundle.bands[i].dev = ldev
-			devPath = ldev.Path()
-			bundle.bands[i].attached = true
-		}
-
-		if lastByte != bundle.bands[i].offset {
-			table = append(table, devmapper.ZeroTable{
-				Start:  lastByte,
-				Length: bundle.bands[i].offset - lastByte,
-			})
-		}
-
-		table = append(table, devmapper.LinearTable{
-			Start:         bundle.bands[i].offset,
-			Length:        bundle.bands[i].size,
-			BackendDevice: devPath,
-		})
-
-		lastByte = bundle.bands[i].offset + bundle.bands[i].size
-	}
-
-	if lastByte != bundle.h.Size {
-		table = append(table, devmapper.ZeroTable{
-			Start:  lastByte,
-			Length: bundle.h.Size - lastByte,
-		})
-	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	table, err := attachBandsAndPrepareTable(bundle.bands, bundle.h.Size, prog, ctx)
+	cancel()
 
 	mapperActive := false
+	if err == errCancelled {
+		err = detachBands(bundle.bands, prog) // detach all attached bands
+		if err != nil {
+			log.Println("could not detach all loop devices; manual cleanup will be required")
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
-	if verb >= 1 {
+	if verbosity >= 1 {
 		log.Printf("creating device mapper node `%s' with a %d-entry table", opts.DeviceName, len(table))
 	}
 
@@ -255,7 +314,7 @@ func main() {
 		}
 
 		if mapperActive {
-			if verb >= 1 {
+			if verbosity >= 1 {
 				log.Printf("unmapping `%s'", opts.DeviceName)
 			}
 			err = devmapper.Remove(opts.DeviceName)
@@ -267,32 +326,9 @@ func main() {
 			mapperActive = false
 		}
 
-		prog.Describe("detaching")
-		prog.Reset()
+		err = detachBands(bundle.bands, prog)
 
-		anyDetachFail := false
-		for i, _ := range bundle.bands {
-			prog.Add(1)
-			if bundle.bands[i].attached {
-				err := bundle.bands[i].dev.Detach()
-				if err != nil {
-					anyDetachFail = true
-					log.Printf("failed to detach %s: %v", bundle.bands[i].dev.Path(), err)
-					continue
-				}
-				if verb >= 2 {
-					log.Printf("detached %s from %s", bundle.bands[i].path, bundle.bands[i].dev.Path())
-				}
-				bundle.bands[i].attached = false
-			} else if opts.NoOp {
-				if verb >= 2 {
-					log.Printf("[no-op] detached %s", bundle.bands[i].path)
-				}
-				time.Sleep(time.Millisecond * 1)
-			}
-		}
-
-		if anyDetachFail {
+		if err != nil {
 			switch failures {
 			case 0:
 				log.Printf("failed to detach all loop devices; ^C to try again")
@@ -308,9 +344,6 @@ func main() {
 
 		break
 	}
-	e := 0
-	if failures > 0 {
-		e = 1
-	}
-	os.Exit(e)
+
+	os.Exit(failures)
 }
