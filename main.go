@@ -159,6 +159,23 @@ func main() {
 		progressbar.OptionSetWriter(progressOutput),
 	)
 
+	if opts.DeviceName == "" {
+		n := ""
+		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		for _, r := range base {
+			if unicode.IsLetter(r) {
+				n += string(unicode.ToLower(r))
+			} else {
+				n += "_"
+			}
+		}
+		opts.DeviceName = n
+	}
+
+	if verb >= 1 {
+		log.Printf("preparing loopback devices for dm node `%s'", opts.DeviceName)
+	}
+
 	table := make([]devmapper.Table, 0, len(bundle.bands))
 
 	lastByte := uint64(0)
@@ -208,19 +225,6 @@ func main() {
 	}
 
 	mapperActive := false
-
-	if opts.DeviceName == "" {
-		n := ""
-		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		for _, r := range base {
-			if unicode.IsLetter(r) {
-				n += string(unicode.ToLower(r))
-			} else {
-				n += "_"
-			}
-		}
-		opts.DeviceName = n
-	}
 
 	if verb >= 1 {
 		log.Printf("creating device mapper node `%s' with a %d-entry table", opts.DeviceName, len(table))
